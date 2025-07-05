@@ -30,8 +30,10 @@ function App() {
   const [recordingDuration, setRecordingDuration] = useState(0)
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([]) // To accumulate audio data
   const recordingStartTimeRef = useRef<number>(0)
   const durationIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const chunkProcessingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   const processAudioChunk = useCallback(async (audioBlob: Blob) => {
     if (audioBlob.size === 0) return
@@ -97,21 +99,38 @@ function App() {
       setTranscriptChunks([])
       setRecordingDuration(0)
       recordingStartTimeRef.current = Date.now()
+      audioChunksRef.current = [] // Clear accumulated chunks
 
       const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
       mediaRecorderRef.current = mediaRecorder
 
       mediaRecorder.ondataavailable = (event) => {
-        processAudioChunk(event.data)
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
       }
 
-      mediaRecorder.onstop = () => {
+      mediaRecorder.onstop = async () => {
+        // Process any remaining audio data when recording stops
+        if (audioChunksRef.current.length > 0) {
+          const finalBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+          await processAudioChunk(finalBlob)
+          audioChunksRef.current = []
+        }
         stream.getTracks().forEach(track => track.stop())
       }
 
-      // Start recording and get a chunk every 5 seconds
-      mediaRecorder.start(5000)
+      mediaRecorder.start() // Start recording without a time slice
       setIsRecording(true)
+
+      // Periodically process accumulated audio data
+      chunkProcessingIntervalRef.current = setInterval(() => {
+        if (audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+          processAudioChunk(audioBlob)
+          audioChunksRef.current = [] // Clear chunks after processing
+        }
+      }, 5000)
 
       durationIntervalRef.current = setInterval(() => {
         setRecordingDuration(Math.floor((Date.now() - recordingStartTimeRef.current) / 1000))
@@ -131,6 +150,9 @@ function App() {
 
     if (durationIntervalRef.current) {
       clearInterval(durationIntervalRef.current)
+    }
+    if (chunkProcessingIntervalRef.current) {
+      clearInterval(chunkProcessingIntervalRef.current)
     }
 
     setIsRecording(false)
@@ -182,6 +204,7 @@ function App() {
   useEffect(() => {
     return () => {
       if (durationIntervalRef.current) clearInterval(durationIntervalRef.current)
+      if (chunkProcessingIntervalRef.current) clearInterval(chunkProcessingIntervalRef.current)
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         mediaRecorderRef.current.stop()
       }
@@ -211,7 +234,7 @@ function App() {
               >
                 <Button
                   onClick={isRecording ? stopRecording : startRecording}
-                  disabled={isRecording && isProcessing} // Disable stop while processing initial chunk
+                  disabled={isProcessing} // Disable button while processing
                   size="lg"
                   className={`w-24 h-24 rounded-full transition-all duration-300 ${
                     isRecording 
